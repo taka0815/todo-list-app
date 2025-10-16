@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TODOボード</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div id="app" v-cloak>
+      <div>
+        <h1>タスク管理ボード</h1>
+        <form @submit.prevent="handleAddTask">
+          <label>
+            タスク名
+            <input
+              type="text"
+              v-model="newTaskTitle"
+              placeholder="例: 仕様書の確認"
+              required
+            />
+          </label>
+          <label>
+            ステータス
+            <select v-model="newTaskStatus">
+              <option
+                v-for="status in statusLabels"
+                :key="status"
+                :value="status"
+              >
+                {{ status }}
+              </option>
+            </select>
+          </label>
+          <button type="submit" :disabled="!newTaskTitle.trim()">タスク追加</button>
+        </form>
+      </div>
+
+      <section class="board">
+        <article
+          v-for="status in statusLabels"
+          :key="status"
+          :class="['board-column', statusClass(status), { 'drop-target': dragOverStatus === status }]"
+          @dragenter.prevent="onDragEnter(status, $event)"
+          @dragover.prevent="onDragEnter(status, $event)"
+          @drop.prevent="onDrop(status)"
+        >
+          <header class="column-title">
+            <span>{{ status }}</span>
+            <span class="column-count">{{ tasksByStatus[status].length }}</span>
+          </header>
+
+          <div class="column-content">
+            <template v-if="tasksByStatus[status].length">
+              <div
+                v-for="task in tasksByStatus[status]"
+                :key="task.id"
+                :class="['task-card', statusClass(task.status), { dragging: draggingTaskId === task.id }]"
+                draggable="true"
+                @dragstart="startDrag(task.id, $event)"
+                @dragend="endDrag"
+                @click="selectTask(task.id)"
+              >
+                <div class="task-title">{{ task.title }}</div>
+                <div class="task-meta">
+                  <span>作成: {{ formatDate(task.createdAt) }}</span>
+                  <span v-if="task.status === finishedLabel && task.completedAt">
+                    完了: {{ formatDate(task.completedAt) }}
+                  </span>
+                </div>
+              </div>
+            </template>
+            <div v-else class="empty-state">タスクはありません。</div>
+          </div>
+        </article>
+      </section>
+
+      <section v-if="selectedTask" class="detail-panel">
+        <header class="detail-header">
+          <div class="detail-title">{{ selectedTask.title }}</div>
+          <div class="detail-actions">
+            <button
+              type="button"
+              class="danger"
+              @click="deleteTask(selectedTask.id)"
+            >
+              タスク削除
+            </button>
+          </div>
+        </header>
+
+        <section class="comments">
+          <h2 style="margin: 0; font-size: 18px;">コメント</h2>
+
+          <article v-if="selectedTask.comments.length">
+            <div
+              class="comment-item"
+              v-for="comment in selectedTask.comments"
+              :key="comment.id"
+            >
+              <div class="comment-header">
+                <span>{{ formatDate(comment.updatedAt || comment.createdAt) }}</span>
+                <span v-if="comment.updatedAt">編集済み</span>
+              </div>
+              <div v-if="editingCommentId !== comment.id" class="comment-text">
+                {{ comment.text }}
+              </div>
+              <div v-else>
+                <textarea
+                  v-model="editingCommentText"
+                  rows="3"
+                  style="width: 100%; resize: vertical;"
+                ></textarea>
+              </div>
+              <div class="comment-actions">
+                <template v-if="editingCommentId === comment.id">
+                  <button class="secondary" type="button" @click="cancelCommentEdit">
+                    キャンセル
+                  </button>
+                  <button type="button" @click="saveCommentEdit(comment.id)">
+                    保存
+                  </button>
+                </template>
+                <template v-else>
+                  <button
+                    class="secondary"
+                    type="button"
+                    @click="startCommentEdit(comment.id, comment.text)"
+                  >
+                    編集
+                  </button>
+                  <button
+                    type="button"
+                    class="danger"
+                    @click="deleteComment(comment.id)"
+                  >
+                    削除
+                  </button>
+                </template>
+              </div>
+            </div>
+          </article>
+          <div v-else class="empty-state">コメントはまだありません。</div>
+
+          <form @submit.prevent="addComment">
+            <label style="width: 100%;">
+              コメントを追加
+              <textarea
+                v-model="newCommentText"
+                rows="3"
+                placeholder="コメントを入力..."
+                required
+                style="width: 100%; resize: vertical;"
+              ></textarea>
+            </label>
+            <button type="submit" :disabled="!newCommentText.trim()">追加</button>
+          </form>
+        </section>
+      </section>
+    </div>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js" defer></script>
+    <script src="app.js" defer></script>
+  </body>
+</html>
