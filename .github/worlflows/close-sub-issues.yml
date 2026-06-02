@@ -1,0 +1,165 @@
+name: Close sub-issues when parent is closed
+
+on:
+  issues:
+    types: [closed]
+
+permissions:
+  issues: write
+
+jobs:
+  close-sub-issues:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close all sub-issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const parentIssueNumber = context.payload.issue.number;
+            // NOTE: 親と同じ state_reason をサブissueにも伝播させる（completed / not_planned 等）
+            const parentStateReason = context.payload.issue.state_reason || 'completed';
+
+            // NOTE: GITHUB_TOKEN で発火したイベントは別workflowをトリガーしないため、
+            // 本workflow内でBFSにより孫以降のサブissueも再帰的に収集・クローズする。
+            const queue = [parentIssueNumber];
+            const visitedIssues = new Set();
+            const subIssues = [];
+
+            while (queue.length > 0) {
+              const currentIssueNumber = queue.shift();
+
+              // current issueのサブissueを全件取得（ページネーション対応）
+              let page = 1;
+              while (true) {
+                const response = await github.request(
+                  'GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues',
+                  {
+                    owner,
+                    repo,
+                    issue_number: currentIssueNumber,
+                    per_page: 100,
+                    page,
+                  }
+                );
+
+                if (response.data.length === 0) {
+                  break;
+                }
+
+                for (const subIssue of response.data) {
+                  // 同じサブissueを2度処理しないためのガード（循環参照対策含む）
+                  const visitKey = `${subIssue.repository_url}#${subIssue.number}`;
+                  if (visitedIssues.has(visitKey)) {
+                    continue;
+                  }
+                  visitedIssues.add(visitKey);
+
+                  subIssues.push(subIssue);
+
+                  // 同リポジトリのサブissueのみ、さらに孫issueを辿る対象としてキューに追加
+                  const repoUrlMatch = subIssue.repository_url.match(/\/repos\/([^/]+)\/([^/]+)$/);
+                  if (repoUrlMatch && repoUrlMatch[1] === owner && repoUrlMatch[2] === repo) {
+                    queue.push(subIssue.number);
+                  }
+                }
+
+                page++;
+              }
+            }
+
+            if (subIssues.length === 0) {
+              core.info('サブissueが見つかりませんでした。処理をスキップします。');
+              return;
+            }
+
+            core.info(`${subIssues.length}件のサブissue（孫issue以降を含む）が見つかりました。`);
+
+            // サブissueを1件ずつclose
+            const closedIssues = [];
+            const failedIssues = [];
+
+            for (const subIssue of subIssues) {
+              // すでにcloseされている場合はスキップ
+              if (subIssue.state === 'closed') {
+                core.info(`#${subIssue.number} は既にcloseされています。スキップします。`);
+                continue;
+              }
+
+              // サブissueの所属リポジトリを判定（repository_url: https://api.github.com/repos/{owner}/{repo}）
+              const repoUrlMatch = subIssue.repository_url.match(/\/repos\/([^/]+)\/([^/]+)$/);
+              if (!repoUrlMatch) {
+                core.warning(`#${subIssue.number} の repository_url が解析できませんでした: ${subIssue.repository_url}`);
+                continue;
+              }
+              const subOwner = repoUrlMatch[1];
+              const subRepo = repoUrlMatch[2];
+
+              // 別リポジトリのサブissueはスキップ（同番号の無関係なissueを誤クローズしないため）
+              if (subOwner !== owner || subRepo !== repo) {
+                core.info(`#${subIssue.number} は別リポジトリ (${subOwner}/${subRepo}) のサブissueのためスキップします。`);
+                continue;
+              }
+
+              const subNumber = subIssue.number;
+              const issueRef = `#${subNumber}`;
+
+              try {
+                const patchResponse = await github.request(
+                  'PATCH /repos/{owner}/{repo}/issues/{issue_number}',
+                  {
+                    owner: subOwner,
+                    repo: subRepo,
+                    issue_number: subNumber,
+                    state: 'closed',
+                    state_reason: parentStateReason,
+                  }
+                );
+
+                if (patchResponse.status === 200) {
+                  core.info(`${issueRef} をcloseしました。(state_reason: ${parentStateReason})`);
+                  closedIssues.push(issueRef);
+                } else {
+                  core.warning(`${issueRef} のcloseに失敗しました。ステータス: ${patchResponse.status}`);
+                  failedIssues.push(issueRef);
+                }
+              } catch (error) {
+                core.warning(`${issueRef} のcloseに失敗しました: ${error.message}`);
+                failedIssues.push(issueRef);
+              }
+
+              // API Rate Limit対策: サブissueが多い場合はウェイトを入れる
+              if (subIssues.length > 10) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+              }
+            }
+
+            // 親issueにコメントを投稿
+            if (closedIssues.length > 0 || failedIssues.length > 0) {
+              let commentBody = '';
+
+              if (closedIssues.length > 0) {
+                commentBody += `親issueのクローズに伴い、以下のサブissueをクローズしました (state_reason: ${parentStateReason}):\n\n`;
+                for (const ref of closedIssues) {
+                  commentBody += `- ${ref}\n`;
+                }
+              }
+
+              if (failedIssues.length > 0) {
+                commentBody += `\n⚠️ 以下のサブissueのクローズに失敗しました:\n\n`;
+                for (const ref of failedIssues) {
+                  commentBody += `- ${ref}\n`;
+                }
+              }
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: parentIssueNumber,
+                body: commentBody,
+              });
+
+              core.info('親issueにコメントを投稿しました。');
+            }
